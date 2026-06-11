@@ -1,0 +1,42 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Personal/local files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# Personal data and local outputs
+personal/
+private/
+local/
+data/
+datasets/
+outputs/
+exports/
+*.sqlite
+*.sqlite3
+*.db
+
+# Notebook local state
+.ipynb_checkpoints/
