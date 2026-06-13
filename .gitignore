@@ -30,10 +30,14 @@ Thumbs.db
 personal/
 private/
 local/
+docs/session-handoff.md
 data/
 datasets/
 outputs/
 exports/
+samples/
+*.bson
+*.jsonl
 *.sqlite
 *.sqlite3
 *.db

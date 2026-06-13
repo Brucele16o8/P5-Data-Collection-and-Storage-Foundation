@@ -1,0 +1,273 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "_id",
+    "api_version",
+    "collection",
+    "current_url",
+    "device_id",
+    "email_address",
+    "ip",
+    "local_time",
+    "referrer_url",
+    "resolution",
+    "show_recommendation",
+    "store_id",
+    "time_stamp",
+    "user_agent",
+    "user_id_db"
+  ],
+  "properties": {
+    "_id": {
+      "$ref": "#/$defs/ObjectId"
+    },
+    "api_version": {
+      "type": "string"
+    },
+    "cart_products": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "option",
+          "product_id"
+        ],
+        "properties": {
+          "amount": {
+            "type": "integer"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "option": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "option_id",
+                    "option_label",
+                    "value_id",
+                    "value_label"
+                  ],
+                  "properties": {
+                    "option_id": {
+                      "type": "integer"
+                    },
+                    "option_label": {
+                      "type": "string"
+                    },
+                    "value_id": {
+                      "type": "integer"
+                    },
+                    "value_label": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              {
+                "type": "string"
+              }
+            ]
+          },
+          "price": {
+            "type": "string"
+          },
+          "product_id": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "cat_id": {
+      "type": "null"
+    },
+    "collect_id": {
+      "type": "string"
+    },
+    "collection": {
+      "type": "string"
+    },
+    "currency": {
+      "type": "string"
+    },
+    "current_url": {
+      "type": "string"
+    },
+    "device_id": {
+      "type": "string"
+    },
+    "email_address": {
+      "type": "string"
+    },
+    "ip": {
+      "type": "string"
+    },
+    "is_paypal": {
+      "type": "null"
+    },
+    "key_search": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "local_time": {
+      "type": "string"
+    },
+    "option": {
+      "anyOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [],
+            "properties": {
+              "option_id": {
+                "type": "string"
+              },
+              "option_label": {
+                "type": "string"
+              },
+              "quality": {
+                "type": "string"
+              },
+              "quality_label": {
+                "type": "string"
+              },
+              "value_id": {
+                "type": "string"
+              },
+              "value_label": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "alloy",
+            "diamond",
+            "shapediamond"
+          ],
+          "properties": {
+            "alloy": {
+              "type": "string"
+            },
+            "diamond": {
+              "type": "string"
+            },
+            "shapediamond": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "order_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/Double"
+        }
+      ]
+    },
+    "price": {
+      "type": "string"
+    },
+    "product_id": {
+      "type": "string"
+    },
+    "recommendation": {
+      "type": "boolean"
+    },
+    "recommendation_clicked_position": {
+      "type": "integer"
+    },
+    "recommendation_product_id": {
+      "type": "string"
+    },
+    "recommendation_product_position": {
+      "type": "string"
+    },
+    "referrer_url": {
+      "type": "string"
+    },
+    "resolution": {
+      "type": "string"
+    },
+    "show_recommendation": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "store_id": {
+      "type": "string"
+    },
+    "time_stamp": {
+      "type": "integer"
+    },
+    "user_agent": {
+      "type": "string"
+    },
+    "user_id_db": {
+      "type": "string"
+    },
+    "utm_medium": {
+      "type": [
+        "boolean",
+        "string"
+      ]
+    },
+    "utm_source": {
+      "type": [
+        "boolean",
+        "string"
+      ]
+    },
+    "viewing_product_id": {
+      "type": "string"
+    }
+  },
+  "$defs": {
+    "ObjectId": {
+      "type": "object",
+      "properties": {
+        "$oid": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{24}$"
+        }
+      },
+      "required": [
+        "$oid"
+      ],
+      "additionalProperties": false
+    },
+    "Double": {
+      "oneOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "$numberDouble": {
+              "enum": [
+                "Infinity",
+                "-Infinity",
+                "NaN"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}
