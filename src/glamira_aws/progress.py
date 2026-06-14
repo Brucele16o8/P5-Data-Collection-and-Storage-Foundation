@@ -35,17 +35,21 @@ class ProgressReporter:
 
     def __post_init__(self) -> None:
         self.started_at = monotonic()
-        self.last_reported = 0
+        self.last_reported = -1
+        self.last_suffix = ""
         self.report(0, force=True)
 
     def elapsed_seconds(self) -> float:
         return monotonic() - self.started_at
 
     def report(self, count: int, force: bool = False, suffix: str = "") -> None:
+        if force and count == self.last_reported and suffix == self.last_suffix:
+            return
         if not force and count != self.total and count - self.last_reported < self.every:
             return
 
         self.last_reported = count
+        self.last_suffix = suffix
         elapsed = max(self.elapsed_seconds(), 0.001)
         rate = count / elapsed
         if self.total:

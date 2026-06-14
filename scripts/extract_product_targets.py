@@ -13,7 +13,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from glamira_aws.mongodb import MongoSettings, extract_product_targets, write_csv, write_jsonl
+from glamira_aws.mongodb import MongoSettings, extract_product_targets_result, write_csv, write_jsonl
 from glamira_aws.progress import format_duration, write_summary_json
 
 
@@ -26,6 +26,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--collection", default=defaults.collection)
     parser.add_argument("--output", default=str(output_directory / "product_targets.csv"))
     parser.add_argument("--format", choices=("csv", "jsonl"), default="csv")
+    parser.add_argument(
+        "--include-all-candidates",
+        action="store_true",
+        help="Write every ranked product_id + URL candidate instead of one best URL per product_id.",
+    )
     parser.add_argument("--limit-records", type=int, default=None)
     parser.add_argument("--progress-every", type=int, default=int(os.getenv("PROGRESS_EVERY", "10000")))
     parser.add_argument("--summary-output", default=str(output_directory / "product_targets_summary.json"))
@@ -35,15 +40,16 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     started_at = monotonic()
-    rows = []
+    result = None
     cancelled = False
     try:
-        rows = extract_product_targets(
+        result = extract_product_targets_result(
             uri=args.uri,
             database=args.database,
             collection_name=args.collection,
             limit_records=args.limit_records,
             progress_every=args.progress_every,
+            include_all_candidates=args.include_all_candidates,
         )
     except KeyboardInterrupt:
         cancelled = True
@@ -56,6 +62,7 @@ def main() -> None:
             "collection": args.collection,
             "output": args.output,
             "summary_output": args.summary_output,
+            "include_all_candidates": args.include_all_candidates,
             "target_rows": 0,
             "unique_products": 0,
             "elapsed_seconds": round(elapsed, 3),
@@ -67,9 +74,22 @@ def main() -> None:
         print(f"Wrote cancellation summary to {args.summary_output}", flush=True)
         sys.exit(130)
 
-    print(f"Aggregated {len(rows)} ranked product target rows", flush=True)
+    rows = result.rows
+    output_mode = "all_ranked_candidates" if args.include_all_candidates else "one_best_target_per_product"
+    print(
+        f"Grouped {result.grouped_url_count:,} product URL candidates; "
+        f"writing {len(rows):,} rows in {output_mode} mode",
+        flush=True,
+    )
+    write_progress_every = max(1, len(rows) // 10) if rows else args.progress_every
     if args.format == "jsonl":
-        write_jsonl(args.output, rows)
+        write_jsonl(
+            args.output,
+            rows,
+            total=len(rows),
+            progress_every=write_progress_every,
+            progress_label="Writing product target JSONL",
+        )
     else:
         write_csv(
             args.output,
@@ -84,6 +104,9 @@ def main() -> None:
                 "last_seen_at",
                 "url_rank",
             ],
+            total=len(rows),
+            progress_every=write_progress_every,
+            progress_label="Writing product target CSV",
         )
     elapsed = monotonic() - started_at
     summary = {
@@ -94,8 +117,13 @@ def main() -> None:
         "collection": args.collection,
         "output": args.output,
         "summary_output": args.summary_output,
+        "include_all_candidates": args.include_all_candidates,
+        "output_mode": output_mode,
+        "scanned_records": result.scanned_records,
+        "candidate_records": result.candidate_records,
+        "grouped_url_count": result.grouped_url_count,
         "target_rows": len(rows),
-        "unique_products": len({row.get("product_id") for row in rows if row.get("product_id")}),
+        "unique_products": result.unique_products,
         "elapsed_seconds": round(elapsed, 3),
         "elapsed": format_duration(elapsed),
     }

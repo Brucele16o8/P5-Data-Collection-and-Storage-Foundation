@@ -70,6 +70,22 @@ class ProductUrlExtractionTest(unittest.TestCase):
         self.assertEqual(candidates[0]["event_count"], 2)
         self.assertEqual(candidates[0]["url_rank"], 1)
 
+    def test_aggregate_can_return_one_best_target_per_product(self):
+        records = [
+            {"event_type": "view_product_detail", "product_id": "P1", "current_url": "https://example.com/a"},
+            {"event_type": "view_product_detail", "product_id": "P1", "current_url": "https://example.com/a"},
+            {"event_type": "view_product_detail", "product_id": "P1", "current_url": "https://example.com/b"},
+            {"event_type": "view_product_detail", "product_id": "P2", "current_url": "https://example.com/c"},
+        ]
+
+        candidates = aggregate_product_url_candidates(records, include_all_candidates=False)
+
+        self.assertEqual(len(candidates), 2)
+        self.assertEqual(candidates[0]["product_id"], "P1")
+        self.assertEqual(candidates[0]["candidate_url"], "https://example.com/a")
+        self.assertEqual(candidates[0]["url_rank"], 1)
+        self.assertEqual(candidates[1]["product_id"], "P2")
+
 
 if __name__ == "__main__":
     unittest.main()

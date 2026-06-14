@@ -126,6 +126,8 @@ The pipeline extracts product targets from these events:
 - `product_detail_recommendation_noticed`
 - `product_view_all_recommend_clicked`
 
+By default, `scripts/extract_product_targets.py` writes one best crawl target per distinct `product_id`. This matches the requirement to crawl one active product information record per distinct product. If a full audit of every ranked `product_id + URL` candidate is needed, run extraction with `--include-all-candidates` and write that audit to a separate file.
+
 For each distinct product ID, the crawler keeps one active product result.
 
 ## Product Crawling Logic
@@ -319,6 +321,8 @@ uv run python scripts/extract_product_targets.py \
   --progress-every 1000
 ```
 
+This writes one best target row per distinct `product_id` to `product_targets.csv`.
+
 Run the product crawler against the sample:
 
 ```bash
@@ -326,6 +330,7 @@ OUTPUT_DIRECTORY="$RUN_OUTPUT" \
 uv run python scripts/crawl_products.py \
   --input "$RUN_OUTPUT/product_targets.csv" \
   --output "$RUN_OUTPUT/product_information.jsonl" \
+  --resume \
   --timeout-seconds 20 \
   --workers 6 \
   --progress-every 25
@@ -339,6 +344,7 @@ uv run python scripts/crawl_products.py \
   --input "$RUN_OUTPUT/product_targets.csv" \
   --output "$RUN_OUTPUT/product_information_test_100.jsonl" \
   --limit 100 \
+  --resume \
   --timeout-seconds 20 \
   --workers 6 \
   --progress-every 10
@@ -355,6 +361,7 @@ IP2LOCATION_DB_URI="/path/to/IP-COUNTRY-REGION-CITY.BIN" \
 uv run python scripts/process_ip_locations.py \
   --target-db countly_enriched \
   --target-collection "ip_locations_sample_${SAMPLE_SIZE}" \
+  --mongodb-batch-size 1000 \
   --progress-every 1000
 ```
 
@@ -371,6 +378,7 @@ outputs/local-sample-<N>/product_targets.csv
 outputs/local-sample-<N>/product_targets_summary.json
 outputs/local-sample-<N>/product_information.jsonl
 outputs/local-sample-<N>/product_information_summary.json
+outputs/local-sample-<N>/product_failed_targets.csv
 outputs/local-sample-<N>/ip_locations.jsonl
 outputs/local-sample-<N>/ip_locations_summary.json
 MongoDB: countly_enriched.ip_locations_sample_<N>
@@ -413,6 +421,8 @@ uv run python scripts/extract_product_targets.py \
   --progress-every 10000
 ```
 
+This writes the crawl input file with one best target row per distinct `product_id`. Do not use `--include-all-candidates` for the normal pipeline; that option writes every ranked URL candidate and can produce a multi-GB audit file.
+
 Run the full product crawler:
 
 ```bash
@@ -421,6 +431,7 @@ CRAWL_WORKERS=6 \
 uv run python scripts/crawl_products.py \
   --input "$RUN_OUTPUT/product_targets.csv" \
   --output "$RUN_OUTPUT/product_information.jsonl" \
+  --resume \
   --timeout-seconds 20 \
   --workers 6 \
   --progress-every 25
@@ -432,6 +443,24 @@ Notes for the full crawl:
 - Start with `--limit 100` if you want a quick confidence check before running all products.
 - `product_information.jsonl` can become large because it stores the full parsed `react_data` object.
 - Failed products are written with status values such as `not_found_in_configured_stores` instead of stopping the run.
+- Use `--resume` for long crawls. The crawler writes each completed product row immediately and skips existing `requested_product_id` values when restarted with the same output file.
+- The crawler also writes `product_failed_targets.csv`, which can be used later to retry only failed products.
+
+Retry only failed products later:
+
+```bash
+OUTPUT_DIRECTORY="$RUN_OUTPUT" \
+uv run python scripts/crawl_products.py \
+  --input "$RUN_OUTPUT/product_failed_targets.csv" \
+  --output "$RUN_OUTPUT/product_information_retry.jsonl" \
+  --failed-output "$RUN_OUTPUT/product_failed_targets_retry.csv" \
+  --resume \
+  --timeout-seconds 20 \
+  --workers 6 \
+  --progress-every 25
+```
+
+Keep retry output separate from the original crawl output. This makes it clear which rows came from the first crawl and which rows came from the later retry.
 
 Run IP geolocation against the full collection using the local BIN file:
 
@@ -444,6 +473,7 @@ IP2LOCATION_DB_URI="/path/to/IP-COUNTRY-REGION-CITY.BIN" \
 uv run python scripts/process_ip_locations.py \
   --target-db countly_enriched \
   --target-collection ip_locations \
+  --mongodb-batch-size 1000 \
   --progress-every 1000
 ```
 
@@ -464,6 +494,7 @@ IP2LOCATION_DB_URI="/path/to/IP-COUNTRY-REGION-CITY.BIN" \
 uv run python scripts/process_ip_locations.py \
   --target-db countly_enriched \
   --target-collection ip_locations \
+  --mongodb-batch-size 1000 \
   --progress-every 1000
 ```
 
@@ -471,6 +502,16 @@ Each long-running script prints progress to the terminal. Example:
 
 ```text
 [16:05:10 UTC] Crawling products: 250/8,663 (2.9%) at 1.8/s elapsed=4m 12s | ok=245, active=245
+```
+
+Product target extraction has multiple visible phases:
+
+```text
+Scanning and aggregating MongoDB product events
+Organizing URLs by product
+Ranking product URL candidates
+Sorting ranked product URL rows
+Writing product target CSV
 ```
 
 For quieter output, increase `--progress-every`. For more frequent output, decrease it.
@@ -482,12 +523,25 @@ outputs/local-full-run/product_targets.csv
 outputs/local-full-run/product_targets_summary.json
 outputs/local-full-run/product_information.jsonl
 outputs/local-full-run/product_information_summary.json
+outputs/local-full-run/product_failed_targets.csv
 outputs/local-full-run/ip_locations.jsonl
 outputs/local-full-run/ip_locations_summary.json
 MongoDB: countly_enriched.ip_locations
 ```
 
-The summary JSON files record elapsed time, processed counts, success counts, output paths, and whether the run was cancelled.
+The summary JSON files record elapsed time, processed counts, success counts, success rates, output paths, failed target counts, and whether the run was cancelled. For crawler summaries, `success_rate_processed_percent` means successful crawls divided by processed products, while `success_rate_target_percent` means successful crawls divided by all target products originally scheduled for the run.
+
+The IP geolocation script tracks each long-running phase:
+
+```text
+Preparing IP2Location database
+Scanning MongoDB IP values
+Processing IP locations
+Writing IP locations to MongoDB
+Uploading IP output to S3, when configured
+```
+
+By default, IP discovery uses a scan mode so progress remains visible while unique IPs are found. Use `--ip-discovery-mode aggregate` only if you prefer MongoDB-side grouping and accept that it may be quiet while MongoDB builds the distinct IP set. The script streams `ip_locations.jsonl` as it processes each distinct IP and writes MongoDB rows in upsert batches. Tune `--mongodb-batch-size` only if the EC2 instance or MongoDB container needs smaller or larger write batches.
 
 If the crawler or IP geolocation script is cancelled with `Ctrl+C`, it writes the rows already processed plus a summary file like:
 
@@ -501,6 +555,8 @@ If the crawler or IP geolocation script is cancelled with `Ctrl+C`, it writes th
 ```
 
 Product target extraction writes its final target file only after aggregation completes. If it is cancelled during MongoDB scanning, it writes a cancellation summary but does not write a partial target file because ranking requires the full candidate set.
+
+To continue a stopped product crawl, rerun the same crawler command with `--resume` and the same `--output` path. To start a clean crawl from the beginning, omit `--resume` or use a new output file.
 
 After the full local run finishes, review row counts:
 
@@ -526,8 +582,10 @@ The cloud setup uses:
 Detailed EC2 setup and full run commands are documented separately:
 
 ```text
-docs/ec2-cloud-runbook.md
+phase_zips/ec2-cloud-runbook.md
 ```
+
+`phase_zips/` is a local ignored phase-guide folder for this workspace. It is not intended as a GitHub deliverable.
 
 ## Repository Structure
 
@@ -548,8 +606,15 @@ src/glamira_aws/
 
 docs/
   architecture.md
-  ec2-cloud-runbook.md
   schema/schema-countly-summary-standardJSON.json
+
+phase_zips/           local ignored guide and handoff folder
+  00_big_picture.md
+  01_decision_diary.md
+  02_phase_guide_from_scratch.md
+  03_command_cheatsheet.md
+  ec2-cloud-runbook.md
+  session-handoff.md
 
 tests/
   test_product_url_extraction.py
