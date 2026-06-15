@@ -1,0 +1,38 @@
+{
+  "stage": "crawl_products",
+  "cancelled": false,
+  "resume": true,
+  "input": "outputs/local-full-run/product_targets.csv",
+  "output": "outputs/local-full-run/product_information.jsonl",
+  "failed_output": "outputs/local-full-run/product_failed_targets.csv",
+  "summary_output": "outputs/local-full-run/product_information_summary.json",
+  "target_count": 19417,
+  "pending_target_count": 19399,
+  "skipped_checkpoint_count": 18,
+  "checkpoint_row_count": 18,
+  "checkpoint_invalid_line_count": 0,
+  "processed_this_run_count": 19399,
+  "processed_count": 19417,
+  "remaining_count": 0,
+  "failed_target_count": 994,
+  "ok_count": 18423,
+  "active_count": 18423,
+  "success_rate_processed_percent": 94.88,
+  "success_rate_target_percent": 94.88,
+  "status_counts": {
+    "ok": 18423,
+    "not_found_in_configured_stores": 994
+  },
+  "country_store_counts": {
+    "ie": 18081,
+    "vn": 154,
+    "com.tr": 178,
+    "com.bo": 4,
+    "com.uy": 5,
+    "al": 1
+  },
+  "workers": 24,
+  "timeout_seconds": 10,
+  "elapsed_seconds": 5328.827,
+  "elapsed": "1h 28m 48s"
+}

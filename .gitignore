@@ -8,6 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+.uv-cache/
 
 # Personal/local files
 .DS_Store
@@ -34,7 +35,14 @@ docs/session-handoff.md
 phase_zips/
 data/
 datasets/
-outputs/
+outputs/*
+!outputs/local-full-run/
+!outputs/local-full-run/README.md
+!outputs/local-full-run/product_failed_targets.csv
+!outputs/local-full-run/product_information.jsonl.zst
+!outputs/local-full-run/product_information_summary.json
+!outputs/local-full-run/product_targets.csv
+!outputs/local-full-run/product_targets_summary.json
 exports/
 samples/
 *.bson
@@ -45,3 +53,4 @@ samples/
 
 # Notebook local state
 .ipynb_checkpoints/
+.pytest_cache/

@@ -1,0 +1,18 @@
+{
+  "stage": "extract_product_targets",
+  "cancelled": false,
+  "mongo_uri": "mongodb://localhost:27017",
+  "database": "countly",
+  "collection": "summary",
+  "output": "outputs/local-full-run/product_targets.csv",
+  "summary_output": "outputs/local-full-run/product_targets_summary.json",
+  "include_all_candidates": false,
+  "output_mode": "one_best_target_per_product",
+  "scanned_records": 21786494,
+  "candidate_records": 21786133,
+  "grouped_url_count": 14358740,
+  "target_rows": 19417,
+  "unique_products": 19417,
+  "elapsed_seconds": 675.307,
+  "elapsed": "11m 15s"
+}
