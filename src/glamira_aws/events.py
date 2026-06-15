@@ -10,7 +10,7 @@ from glamira_aws.progress import ProgressReporter
 PRODUCT_CURRENT_URL_EVENTS = {
     "view_product_detail",
     "select_product_option",
-    "select_product6_option_quality",
+    "select_product_option_quality",
     "add_to_cart_action",
     "product_detail_recommendation_visible",
     "product_detail_recommendation_noticed",

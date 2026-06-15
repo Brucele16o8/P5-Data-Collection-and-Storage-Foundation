@@ -120,7 +120,7 @@ The pipeline extracts product targets from these events:
 
 - `view_product_detail`
 - `select_product_option`
-- `select_product6_option_quality`
+- `select_product_option_quality`
 - `add_to_cart_action`
 - `product_detail_recommendation_visible`
 - `product_detail_recommendation_noticed`
@@ -182,8 +182,8 @@ It also stores the parsed `react_data_basic` and full `react_data` object where 
 The final outputs are written as JSONL:
 
 ```text
-outputs/full-run/product_information.jsonl
-outputs/full-run/ip_locations.jsonl
+outputs/local-full-run/product_information.jsonl
+outputs/local-full-run/ip_locations.jsonl
 ```
 
 In AWS, the output is uploaded to S3:
@@ -214,7 +214,7 @@ s3://glamira-data-lake-20260611/raw/reference/ip2location/IP-COUNTRY-REGION-CITY
 On EC2, the IP processing script downloads the BIN file from S3, reads distinct IP addresses from MongoDB, enriches them, and writes:
 
 ```text
-outputs/full-run/ip_locations.jsonl
+outputs/local-full-run/ip_locations.jsonl
 countly_enriched.ip_locations
 ```
 
@@ -261,7 +261,7 @@ docker compose up -d mongodb
 Run tests:
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests
+uv run --extra dev pytest
 ```
 
 ## Choose A Run Size

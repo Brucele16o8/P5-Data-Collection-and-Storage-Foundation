@@ -29,6 +29,18 @@ class ProductUrlExtractionTest(unittest.TestCase):
 
         self.assertEqual(candidate["product_id"], "P200")
 
+    def test_quality_event_is_included(self):
+        record = {
+            "event_type": "select_product_option_quality",
+            "product_id": "P250",
+            "current_url": "https://example.com/p250",
+        }
+
+        candidate = build_product_url_candidate(record)
+
+        self.assertEqual(candidate["product_id"], "P250")
+        self.assertEqual(candidate["source_event_type"], "select_product_option_quality")
+
     def test_recommend_clicked_uses_referrer_url(self):
         record = {
             "event_type": "product_view_all_recommend_clicked",

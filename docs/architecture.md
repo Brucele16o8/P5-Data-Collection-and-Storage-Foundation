@@ -41,7 +41,7 @@ AWS execution:
 Python on EC2
   -> mongodb://localhost:27017
   -> Docker MongoDB full collection
-  -> outputs/aws-test, then outputs/full-run
+  -> outputs/aws-test, then outputs/local-full-run
   -> S3 product-information/
 ```
 
@@ -83,7 +83,7 @@ EC2 role
   -> write s3://glamira-data-lake-20260611/product-information/*
 ```
 
-Do not copy local AWS SSO profiles, admin credentials, MongoDB database files, dump files, or crawler outputs into GitHub.
+Do not copy local AWS SSO profiles, admin credentials, MongoDB database files, or raw dump files into GitHub. The final `outputs/local-full-run` deliverable can be added deliberately when it is ready for submission.
 
 The Python code stays environment-independent:
 
@@ -106,7 +106,7 @@ and between:
 ```text
 outputs/local-test
 outputs/aws-test
-outputs/full-run
+outputs/local-full-run
 ```
 
 Glue, Redshift, Batch, ECS, and Fargate remain possible future upgrades, but they are not required for the VM + MongoDB objective.
