@@ -8,11 +8,11 @@
   "summary_output": "outputs/local-full-run/product_targets_summary.json",
   "include_all_candidates": false,
   "output_mode": "one_best_target_per_product",
-  "scanned_records": 21786494,
-  "candidate_records": 21786133,
-  "grouped_url_count": 14358740,
+  "scanned_records": 24018319,
+  "candidate_records": 24017958,
+  "grouped_url_count": 15037366,
   "target_rows": 19417,
   "unique_products": 19417,
-  "elapsed_seconds": 675.307,
-  "elapsed": "11m 15s"
+  "elapsed_seconds": 686.22,
+  "elapsed": "11m 26s"
 }

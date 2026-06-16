@@ -81,11 +81,11 @@ Future production versions could move the crawler to AWS Batch or Fargate, but E
 2. EC2 downloads the dump
 3. mongorestore loads BSON into Docker MongoDB
 4. Python queries MongoDB event records
-5. Python extracts product IDs and candidate URLs
-6. Python keeps one best target URL per product ID
-7. Python crawls Glamira product pages
-8. Python parses var react_data from product HTML
-9. Python enriches distinct IP addresses with IP2Location
+5. Python enriches distinct IP addresses from all MongoDB source records with IP2Location
+6. Python extracts product IDs and candidate URLs
+7. Python keeps one best target URL per product ID
+8. Python crawls Glamira product pages
+9. Python parses var react_data from product HTML
 10. Python writes product information and IP output
 11. Output is uploaded to S3
 ```
@@ -203,7 +203,7 @@ This prevents the pipeline from stopping when individual product pages are unava
 
 ## IP Location Processing
 
-IP geolocation is part of the Project 05 requirements. The AWS version uses the same idea as the original requirement: read unique IPs from MongoDB, use `ip2location-python`, and store the result in both a file and a MongoDB collection.
+IP geolocation is Task 5 in the Project 05 requirements, so it runs before the product-information collection step. The AWS version keeps the same requirement: read unique IPs from the main MongoDB collection, use `ip2location-python`, and store the result in both a file and a MongoDB collection. For the full dataset, this means discovering locations from all source records with an IP field, not only records that later become product targets. In the current restored full dump, `countly.summary` contains 41,432,473 records, and the IP summary should show the all-record scope with `discovery_scope=all_collection_ips`.
 
 The IP2Location BIN file should live in S3, for example:
 
@@ -211,7 +211,7 @@ The IP2Location BIN file should live in S3, for example:
 s3://glamira-data-lake-20260611/raw/reference/ip2location/IP-COUNTRY-REGION-CITY.BIN
 ```
 
-On EC2, the IP processing script downloads the BIN file from S3, reads distinct IP addresses from MongoDB, enriches them, and writes:
+On EC2, the IP processing script downloads the BIN file from S3, reads distinct IP addresses from all MongoDB source records, enriches them, and writes:
 
 ```text
 outputs/local-full-run/ip_locations.jsonl
@@ -310,6 +310,21 @@ uv run python scripts/create_mongodb_sample.py \
   --mode random
 ```
 
+Run Task 5 IP geolocation against all records in the same sample:
+
+```bash
+MONGO_URI="mongodb://localhost:27017" \
+MONGO_DATABASE=countly_samples \
+MONGO_COLLECTION="$SAMPLE_COLLECTION" \
+OUTPUT_DIRECTORY="$RUN_OUTPUT" \
+IP2LOCATION_DB_URI="/path/to/IP-COUNTRY-REGION-CITY.BIN" \
+uv run python scripts/process_ip_locations.py \
+  --target-db countly_enriched \
+  --target-collection "ip_locations_sample_${SAMPLE_SIZE}" \
+  --mongodb-batch-size 1000 \
+  --progress-every 1000
+```
+
 Extract product targets from the sample:
 
 ```bash
@@ -348,21 +363,6 @@ uv run python scripts/crawl_products.py \
   --timeout-seconds 20 \
   --workers 6 \
   --progress-every 10
-```
-
-Run IP geolocation against the same sample:
-
-```bash
-MONGO_URI="mongodb://localhost:27017" \
-MONGO_DATABASE=countly_samples \
-MONGO_COLLECTION="$SAMPLE_COLLECTION" \
-OUTPUT_DIRECTORY="$RUN_OUTPUT" \
-IP2LOCATION_DB_URI="/path/to/IP-COUNTRY-REGION-CITY.BIN" \
-uv run python scripts/process_ip_locations.py \
-  --target-db countly_enriched \
-  --target-collection "ip_locations_sample_${SAMPLE_SIZE}" \
-  --mongodb-batch-size 1000 \
-  --progress-every 1000
 ```
 
 Example local BIN path:
@@ -408,6 +408,21 @@ Create a dedicated output folder:
 ```bash
 export RUN_OUTPUT="outputs/local-full-run"
 mkdir -p "$RUN_OUTPUT"
+```
+
+Run Task 5 IP geolocation against all records in the full collection:
+
+```bash
+MONGO_URI="mongodb://localhost:27017" \
+MONGO_DATABASE="countly" \
+MONGO_COLLECTION="summary" \
+OUTPUT_DIRECTORY="$RUN_OUTPUT" \
+IP2LOCATION_DB_URI="/path/to/IP-COUNTRY-REGION-CITY.BIN" \
+uv run python scripts/process_ip_locations.py \
+  --target-db countly_enriched \
+  --target-collection ip_locations \
+  --mongodb-batch-size 1000 \
+  --progress-every 1000
 ```
 
 Extract all product crawl targets from the full collection:
@@ -462,40 +477,10 @@ uv run python scripts/crawl_products.py \
 
 Keep retry output separate from the original crawl output. This makes it clear which rows came from the first crawl and which rows came from the later retry.
 
-Run IP geolocation against the full collection using the local BIN file:
-
-```bash
-MONGO_URI="mongodb://localhost:27017" \
-MONGO_DATABASE="countly" \
-MONGO_COLLECTION="summary" \
-OUTPUT_DIRECTORY="$RUN_OUTPUT" \
-IP2LOCATION_DB_URI="/path/to/IP-COUNTRY-REGION-CITY.BIN" \
-uv run python scripts/process_ip_locations.py \
-  --target-db countly_enriched \
-  --target-collection ip_locations \
-  --mongodb-batch-size 1000 \
-  --progress-every 1000
-```
-
 Example local BIN path:
 
 ```text
 /path/to/IP-COUNTRY-REGION-CITY.BIN
-```
-
-So the full local IP command is:
-
-```bash
-MONGO_URI="mongodb://localhost:27017" \
-MONGO_DATABASE="countly" \
-MONGO_COLLECTION="summary" \
-OUTPUT_DIRECTORY="$RUN_OUTPUT" \
-IP2LOCATION_DB_URI="/path/to/IP-COUNTRY-REGION-CITY.BIN" \
-uv run python scripts/process_ip_locations.py \
-  --target-db countly_enriched \
-  --target-collection ip_locations \
-  --mongodb-batch-size 1000 \
-  --progress-every 1000
 ```
 
 Each long-running script prints progress to the terminal. Example:
@@ -541,7 +526,9 @@ Writing IP locations to MongoDB
 Uploading IP output to S3, when configured
 ```
 
-By default, IP discovery uses a scan mode so progress remains visible while unique IPs are found. Use `--ip-discovery-mode aggregate` only if you prefer MongoDB-side grouping and accept that it may be quiet while MongoDB builds the distinct IP set. The script streams `ip_locations.jsonl` as it processes each distinct IP and writes MongoDB rows in upsert batches. Tune `--mongodb-batch-size` only if the EC2 instance or MongoDB container needs smaller or larger write batches.
+By default, IP discovery uses a scan mode so progress remains visible while unique IPs are found across the MongoDB source collection. The summary records this as `discovery_scope=all_collection_ips`, with `mongodb_ip_record_count`, `mongodb_ip_scanned_count`, `ip_count`, and `unique_location_count`. Use `--ip-discovery-mode aggregate` only if you prefer MongoDB-side grouping and accept that it may be quiet while MongoDB builds the distinct IP set. The script streams `ip_locations.jsonl` as it processes each distinct IP and writes MongoDB rows in upsert batches. Tune `--mongodb-batch-size` only if the EC2 instance or MongoDB container needs smaller or larger write batches.
+
+If a later product-location audit is needed, `scripts/process_ip_locations.py` also supports `--product-targets "$RUN_OUTPUT/product_targets.csv"`. That optional mode uses the target file only as a product-ID filter and scans all matching product events for those IDs. It is not the default Task 5 all-record location pass.
 
 If the crawler or IP geolocation script is cancelled with `Ctrl+C`, it writes the rows already processed plus a summary file like:
 

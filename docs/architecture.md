@@ -70,6 +70,7 @@ Full-data local execution is allowed when the Mac has enough resources, but EC2 
 S3 raw MongoDB dump
   -> EC2 downloads dump
   -> mongorestore into Docker MongoDB on EC2
+  -> Python enriches distinct visitor IPs from all MongoDB source records
   -> Python extracts product targets from countly.summary
   -> Python crawls product pages
   -> S3 product-information output

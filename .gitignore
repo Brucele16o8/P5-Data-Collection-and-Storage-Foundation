@@ -45,6 +45,8 @@ samples/
 *.jsonl
 !outputs/local-full-run/*.jsonl
 outputs/local-full-run/product_information.jsonl
+outputs/local-full-run/ip_locations.jsonl
+!outputs/local-full-run/ip_locations_summary.json
 *.sqlite
 *.sqlite3
 *.db

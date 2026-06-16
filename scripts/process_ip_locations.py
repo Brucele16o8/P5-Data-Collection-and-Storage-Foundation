@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import sys
@@ -16,8 +17,9 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from glamira_aws.events import build_product_url_candidate
 from glamira_aws.ip_locations import IPLocation, lookup_ip2location, lookup_ip2location_with_database, normalize_ip
-from glamira_aws.mongodb import MongoSettings, get_collection
+from glamira_aws.mongodb import MongoSettings, get_collection, product_event_query
 from glamira_aws.progress import ProgressReporter, format_duration, write_summary_json
 from glamira_aws.s3_io import download_to_tmp, is_s3_uri, parse_s3_uri
 
@@ -32,6 +34,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ip-field", default="ip")
     parser.add_argument("--ip2location-db-uri", default=os.getenv("IP2LOCATION_DB_URI"))
     parser.add_argument("--output", default=str(output_directory / "ip_locations.jsonl"))
+    parser.add_argument(
+        "--product-targets",
+        default=os.getenv("PRODUCT_TARGETS_PATH"),
+        help=(
+            "Optional product_targets CSV/JSONL. When set, discover IPs only from product events "
+            "whose extracted product_id is in this target file."
+        ),
+    )
+    parser.add_argument("--product-id-field", default="product_id")
     parser.add_argument("--output-s3-uri", default=os.getenv("IP_LOCATION_OUTPUT_S3_URI"))
     parser.add_argument("--target-db", default=os.getenv("IP_LOCATION_TARGET_DB", "countly_enriched"))
     parser.add_argument(
@@ -53,9 +64,44 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def iter_distinct_ips_aggregate(collection, ip_field: str, limit: int | None = None):
+def read_product_target_ids(path: str | Path, product_id_field: str = "product_id") -> set[str]:
+    """Read product IDs from a product target CSV or JSONL file."""
+    target_path = Path(path).expanduser()
+    product_ids: set[str] = set()
+    if target_path.suffix.lower() == ".jsonl":
+        with target_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                value = row.get(product_id_field)
+                if value is not None and str(value).strip():
+                    product_ids.add(str(value).strip())
+        return product_ids
+
+    with target_path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            value = row.get(product_id_field)
+            if value is not None and str(value).strip():
+                product_ids.add(str(value).strip())
+    return product_ids
+
+
+def iter_distinct_ips_aggregate(
+    collection,
+    ip_field: str,
+    limit: int | None = None,
+    stats: dict[str, int] | None = None,
+):
+    query = {ip_field: {"$type": "string", "$ne": ""}}
+    if stats is not None:
+        try:
+            stats["mongodb_ip_record_count"] = collection.count_documents(query)
+        except Exception:
+            pass
     pipeline: list[dict[str, Any]] = [
-        {"$match": {ip_field: {"$type": "string", "$ne": ""}}},
+        {"$match": query},
         {"$group": {"_id": f"${ip_field}"}},
         {"$sort": {"_id": 1}},
     ]
@@ -71,6 +117,7 @@ def iter_distinct_ips_scan(
     ip_field: str,
     limit: int | None = None,
     progress_every: int = 1000,
+    stats: dict[str, int] | None = None,
 ):
     query = {ip_field: {"$type": "string", "$ne": ""}}
     total = None
@@ -78,10 +125,13 @@ def iter_distinct_ips_scan(
         total = collection.count_documents(query)
     except Exception:
         total = None
+    if stats is not None and total is not None:
+        stats["mongodb_ip_record_count"] = total
     projection = {ip_field: 1}
     cursor = collection.find(query, projection=projection, no_cursor_timeout=True)
     progress = ProgressReporter("Scanning MongoDB IP values", total=total, every=progress_every)
     seen_ips: set[str] = set()
+    scanned_count = 0
     try:
         for scanned_count, document in enumerate(cursor, start=1):
             raw_ip = document.get(ip_field)
@@ -95,7 +145,98 @@ def iter_distinct_ips_scan(
             progress.report(scanned_count, suffix=f"unique_ips={len(seen_ips):,}")
     finally:
         cursor.close()
-        progress.report(scanned_count if "scanned_count" in locals() else 0, force=True, suffix=f"unique_ips={len(seen_ips):,}")
+        if stats is not None:
+            stats["mongodb_ip_scanned_count"] = scanned_count
+        progress.report(scanned_count, force=True, suffix=f"unique_ips={len(seen_ips):,}")
+
+
+def iter_distinct_product_event_ips_scan(
+    collection,
+    ip_field: str,
+    product_ids: set[str],
+    limit: int | None = None,
+    progress_every: int = 1000,
+    stats: dict[str, int] | None = None,
+):
+    query = {"$and": [product_event_query(), {ip_field: {"$type": "string", "$ne": ""}}]}
+    total = None
+    try:
+        total = collection.count_documents(query)
+    except Exception:
+        total = None
+    projection = {
+        ip_field: 1,
+        "collection": 1,
+        "event_type": 1,
+        "event": 1,
+        "event_name": 1,
+        "action": 1,
+        "product_id": 1,
+        "productid": 1,
+        "product": 1,
+        "viewing_product_id": 1,
+        "viewingProductId": 1,
+        "current_url": 1,
+        "currentUrl": 1,
+        "url": 1,
+        "referrer_url": 1,
+        "referrerUrl": 1,
+        "referer_url": 1,
+        "referer": 1,
+        "time_stamp": 1,
+        "event_time": 1,
+    }
+    cursor = collection.find(query, projection=projection, no_cursor_timeout=True)
+    progress = ProgressReporter("Scanning product-event IP values", total=total, every=progress_every)
+    seen_ips: set[str] = set()
+    scanned_count = 0
+    candidate_count = 0
+    matched_count = 0
+    try:
+        for scanned_count, document in enumerate(cursor, start=1):
+            candidate = build_product_url_candidate(document)
+            if not candidate:
+                progress.report(
+                    scanned_count,
+                    suffix=f"matched_events={matched_count:,}, unique_ips={len(seen_ips):,}",
+                )
+                continue
+            candidate_count += 1
+            product_id = str(candidate["product_id"]).strip()
+            if product_id not in product_ids:
+                progress.report(
+                    scanned_count,
+                    suffix=f"matched_events={matched_count:,}, unique_ips={len(seen_ips):,}",
+                )
+                continue
+            matched_count += 1
+            raw_ip = document.get(ip_field)
+            normalized = normalize_ip(raw_ip) or str(raw_ip)
+            if normalized not in seen_ips:
+                seen_ips.add(normalized)
+                yield raw_ip
+                if limit and len(seen_ips) >= limit:
+                    progress.report(
+                        scanned_count,
+                        force=True,
+                        suffix=f"matched_events={matched_count:,}, unique_ips={len(seen_ips):,}",
+                    )
+                    break
+            progress.report(
+                scanned_count,
+                suffix=f"matched_events={matched_count:,}, unique_ips={len(seen_ips):,}",
+            )
+    finally:
+        cursor.close()
+        if stats is not None:
+            stats["product_event_scanned_count"] = scanned_count
+            stats["product_event_candidate_count"] = candidate_count
+            stats["product_event_matched_count"] = matched_count
+        progress.report(
+            scanned_count,
+            force=True,
+            suffix=f"matched_events={matched_count:,}, unique_ips={len(seen_ips):,}",
+        )
 
 
 def iter_distinct_ips(
@@ -104,15 +245,16 @@ def iter_distinct_ips(
     limit: int | None = None,
     progress_every: int = 1000,
     discovery_mode: str = "scan",
+    stats: dict[str, int] | None = None,
 ):
     if discovery_mode == "aggregate":
         print(
             "Discovering distinct IPs with MongoDB aggregation. This mode may be quiet while MongoDB groups values.",
             flush=True,
         )
-        yield from iter_distinct_ips_aggregate(collection, ip_field, limit)
+        yield from iter_distinct_ips_aggregate(collection, ip_field, limit, stats=stats)
         return
-    yield from iter_distinct_ips_scan(collection, ip_field, limit, progress_every)
+    yield from iter_distinct_ips_scan(collection, ip_field, limit, progress_every, stats=stats)
 
 
 def upload_to_s3(local_path: str, s3_uri: str) -> None:
@@ -164,6 +306,21 @@ def write_jsonl_row(handle, row: dict[str, Any]) -> None:
     handle.write(json.dumps(row, default=str, ensure_ascii=False) + "\n")
 
 
+def location_key(row: dict[str, Any]) -> str | None:
+    parts = [
+        str(row.get("country") or "").strip(),
+        str(row.get("region") or "").strip(),
+        str(row.get("city") or "").strip(),
+    ]
+    if not any(parts):
+        latitude = row.get("latitude")
+        longitude = row.get("longitude")
+        if latitude is None or longitude is None:
+            return None
+        return f"{latitude},{longitude}"
+    return " | ".join(parts)
+
+
 def main() -> None:
     started_at = monotonic()
     args = parse_args()
@@ -174,11 +331,23 @@ def main() -> None:
     if db_path:
         print(f"IP2Location database ready at {db_path}", flush=True)
     collection = get_collection(args.uri, args.database, args.collection)
-    print(
-        f"Reading distinct IP addresses from {args.database}.{args.collection} "
-        f"with {args.ip_discovery_mode} discovery",
-        flush=True,
-    )
+    product_target_ids = None
+    if args.product_targets:
+        product_target_ids = read_product_target_ids(args.product_targets, args.product_id_field)
+        print(
+            f"Loaded {len(product_target_ids):,} product target IDs from {args.product_targets}",
+            flush=True,
+        )
+        print(
+            f"Reading distinct product-event IP addresses from {args.database}.{args.collection}",
+            flush=True,
+        )
+    else:
+        print(
+            f"Reading distinct IP addresses from {args.database}.{args.collection} "
+            f"with {args.ip_discovery_mode} discovery",
+            flush=True,
+        )
     progress = ProgressReporter("Processing IP locations", total=args.limit, every=args.progress_every)
 
     target_collection = None
@@ -200,7 +369,11 @@ def main() -> None:
     ok_count = 0
     status_counts: Counter[str] = Counter()
     country_counts: Counter[str] = Counter()
+    location_counts: Counter[str] = Counter()
+    unique_locations: set[str] = set()
     cancelled = False
+    product_ip_stats: dict[str, int] = {}
+    all_record_ip_stats: dict[str, int] = {}
 
     database = None
     missing_dependency = False
@@ -235,13 +408,26 @@ def main() -> None:
 
     try:
         with output_path.open("w", encoding="utf-8") as handle:
-            for ip in iter_distinct_ips(
-                collection,
-                args.ip_field,
-                args.limit,
-                progress_every=args.progress_every,
-                discovery_mode=args.ip_discovery_mode,
-            ):
+            ip_iterator = (
+                iter_distinct_product_event_ips_scan(
+                    collection,
+                    args.ip_field,
+                    product_target_ids,
+                    args.limit,
+                    progress_every=args.progress_every,
+                    stats=product_ip_stats,
+                )
+                if product_target_ids is not None
+                else iter_distinct_ips(
+                    collection,
+                    args.ip_field,
+                    args.limit,
+                    progress_every=args.progress_every,
+                    discovery_mode=args.ip_discovery_mode,
+                    stats=all_record_ip_stats,
+                )
+            )
+            for ip in ip_iterator:
                 source_ip_count += 1
                 normalized = normalize_ip(ip) or str(ip)
                 if normalized in seen_ips:
@@ -257,6 +443,10 @@ def main() -> None:
                 status_counts[status] += 1
                 if row.get("country"):
                     country_counts[str(row.get("country"))] += 1
+                key = location_key(row)
+                if key:
+                    unique_locations.add(key)
+                    location_counts[key] += 1
                 ok_count += 1 if status == "ok" else 0
 
                 if target_collection is not None and len(batch) >= args.mongodb_batch_size:
@@ -294,16 +484,35 @@ def main() -> None:
         "collection": args.collection,
         "output": args.output,
         "summary_output": args.summary_output,
+        "discovery_scope": "product_target_events" if product_target_ids is not None else "all_collection_ips",
+        "task5_scope_note": (
+            "Task 5 IP processing reads distinct IPs from all MongoDB source records with an IP field."
+            if product_target_ids is None
+            else "Optional product-event IP audit mode; not the default Task 5 all-record location pass."
+        ),
+        "product_targets": args.product_targets,
+        "product_target_filter_mode": "product_id_only" if product_target_ids is not None else None,
+        "product_target_filter_note": (
+            "The product target file is used only to choose eligible product IDs; "
+            "IP discovery scans all matching product events for those IDs, not only the best URL rows."
+            if product_target_ids is not None
+            else None
+        ),
+        "product_target_id_count": None if product_target_ids is None else len(product_target_ids),
+        **all_record_ip_stats,
+        **product_ip_stats,
         "target_db": None if args.skip_mongodb_write else args.target_db,
         "target_collection": None if args.skip_mongodb_write else args.target_collection,
         "source_ip_count": source_ip_count,
         "ip_count": processed_count,
         "processed_count": processed_count,
+        "unique_location_count": len(unique_locations),
         "remaining_count": None if args.limit is None else max(args.limit - source_ip_count, 0),
         "skipped_duplicate_count": skipped_duplicate_count,
         "mongodb_written_count": None if args.skip_mongodb_write else mongodb_written_count,
         "status_counts": dict(status_counts),
         "country_counts": dict(country_counts),
+        "location_counts": dict(location_counts),
         "ip2location_db_uri": args.ip2location_db_uri,
         "ip_discovery_mode": args.ip_discovery_mode,
         "mongodb_batch_size": args.mongodb_batch_size,
