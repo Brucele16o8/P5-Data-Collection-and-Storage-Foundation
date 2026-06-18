@@ -124,6 +124,146 @@ def product_event_query() -> dict[str, Any]:
     }
 
 
+def _coalesce_fields(*fields: str) -> dict[str, Any]:
+    return {"$ifNull": [f"${field}" for field in fields]}
+
+
+def product_target_aggregation_pipeline(limit_records: int | None = None) -> list[dict[str, Any]]:
+    """Build a MongoDB aggregation that groups product URL candidates server-side."""
+    pipeline: list[dict[str, Any]] = [
+        {"$match": product_event_query()},
+    ]
+    if limit_records:
+        pipeline.append({"$limit": limit_records})
+    pipeline.extend(
+        [
+            {
+                "$project": {
+                    "source_event_type": {
+                        "$toLower": {
+                            "$toString": _coalesce_fields(
+                                "event_type",
+                                "event",
+                                "event_name",
+                                "collection",
+                                "action",
+                            )
+                        }
+                    },
+                    "current_url": _coalesce_fields("current_url", "currentUrl", "url"),
+                    "referrer_url": _coalesce_fields(
+                        "referrer_url",
+                        "referrerUrl",
+                        "referer_url",
+                        "referer",
+                    ),
+                    "product_id": _coalesce_fields("product_id", "productid", "product"),
+                    "viewing_product_id": _coalesce_fields("viewing_product_id", "viewingProductId"),
+                    "event_time": _coalesce_fields(
+                        "event_time",
+                        "time_stamp",
+                        "timestamp",
+                        "created_at",
+                        "time",
+                        "datetime",
+                    ),
+                }
+            },
+            {
+                "$project": {
+                    "source_event_type": 1,
+                    "url_source_field": {
+                        "$cond": [
+                            {"$eq": ["$source_event_type", RECOMMEND_CLICK_EVENT]},
+                            "referrer_url",
+                            "current_url",
+                        ]
+                    },
+                    "product_id": {
+                        "$cond": [
+                            {"$eq": ["$source_event_type", RECOMMEND_CLICK_EVENT]},
+                            "$viewing_product_id",
+                            {"$ifNull": ["$product_id", "$viewing_product_id"]},
+                        ]
+                    },
+                    "candidate_url": {
+                        "$cond": [
+                            {"$eq": ["$source_event_type", RECOMMEND_CLICK_EVENT]},
+                            "$referrer_url",
+                            "$current_url",
+                        ]
+                    },
+                    "event_time": {"$toString": "$event_time"},
+                }
+            },
+            {
+                "$match": {
+                    "product_id": {"$nin": [None, "", "none", "null", "nan"]},
+                    "candidate_url": {"$nin": [None, "", "none", "null", "nan"]},
+                }
+            },
+            {
+                "$group": {
+                    "_id": {
+                        "product_id": {"$toString": "$product_id"},
+                        "candidate_url": {"$toString": "$candidate_url"},
+                        "source_event_type": "$source_event_type",
+                        "url_source_field": "$url_source_field",
+                    },
+                    "event_count": {"$sum": 1},
+                    "first_seen_at": {"$min": "$event_time"},
+                    "last_seen_at": {"$max": "$event_time"},
+                }
+            },
+            {
+                "$project": {
+                    "_id": 0,
+                    "product_id": "$_id.product_id",
+                    "candidate_url": "$_id.candidate_url",
+                    "source_event_type": "$_id.source_event_type",
+                    "url_source_field": "$_id.url_source_field",
+                    "event_count": 1,
+                    "first_seen_at": 1,
+                    "last_seen_at": 1,
+                }
+            },
+            {"$sort": {"product_id": 1, "event_count": -1, "last_seen_at": -1}},
+        ]
+    )
+    return pipeline
+
+
+def iter_product_targets_mongodb(
+    uri: str,
+    database: str,
+    collection_name: str,
+    limit_records: int | None = None,
+    include_all_candidates: bool = False,
+):
+    """Yield ranked product targets from MongoDB without storing all groups in Python."""
+    collection = get_collection(uri, database, collection_name)
+    cursor = collection.aggregate(
+        product_target_aggregation_pipeline(limit_records=limit_records),
+        allowDiskUse=True,
+    )
+    previous_product_id = None
+    rank = 0
+    try:
+        for row in cursor:
+            product_id = row.get("product_id")
+            if product_id != previous_product_id:
+                previous_product_id = product_id
+                rank = 1
+            else:
+                rank += 1
+            if not include_all_candidates and rank > 1:
+                continue
+            row["url_rank"] = rank
+            yield row
+    finally:
+        cursor.close()
+
+
 def extract_product_targets(
     uri: str,
     database: str,

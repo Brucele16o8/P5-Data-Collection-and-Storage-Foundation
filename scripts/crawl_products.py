@@ -12,6 +12,7 @@ from concurrent.futures import as_completed
 from pathlib import Path
 from time import monotonic
 from collections import Counter
+from typing import Iterable
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -49,6 +50,42 @@ def _read_targets(path: str) -> list[dict[str, str]]:
     if path.endswith(".jsonl"):
         return read_jsonl(path)
     return read_csv(path)
+
+
+def _iter_target_rows(path: str) -> Iterable[dict[str, str]]:
+    input_path = Path(path).expanduser()
+    if path.endswith(".jsonl"):
+        with input_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    yield json.loads(line)
+        return
+
+    with input_path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        yield from reader
+
+
+def _iter_best_targets(path: str, limit: int | None = None) -> Iterable[dict[str, str]]:
+    last_product_id = None
+    yielded = 0
+    for row in _iter_target_rows(path):
+        product_id = row.get("product_id")
+        url = row.get("candidate_url")
+        if not product_id or not url:
+            continue
+        product_id = str(product_id)
+        if product_id == last_product_id:
+            continue
+        last_product_id = product_id
+        yield row
+        yielded += 1
+        if limit and yielded >= limit:
+            break
+
+
+def _count_best_targets(path: str, limit: int | None = None) -> int:
+    return sum(1 for _ in _iter_best_targets(path, limit))
 
 
 def _pick_best_targets(rows: list[dict[str, str]], limit: int | None) -> list[dict[str, str]]:
@@ -167,15 +204,15 @@ def _latest_rows_by_product(path: str, target_product_ids: set[str] | None = Non
 def _write_failed_targets(
     product_info_path: str,
     failed_output_path: str,
-    targets: list[dict[str, str]],
+    targets: Iterable[dict[str, str]],
 ) -> int:
-    target_product_ids = {str(row.get("product_id")) for row in targets if row.get("product_id")}
-    latest_rows = _latest_rows_by_product(product_info_path, target_product_ids)
     target_by_product_id = {
         str(row.get("product_id")): row
         for row in targets
         if row.get("product_id")
     }
+    target_product_ids = set(target_by_product_id)
+    latest_rows = _latest_rows_by_product(product_info_path, target_product_ids)
     fieldnames = [
         "product_id",
         "candidate_url",
@@ -241,19 +278,13 @@ def main() -> None:
     started_at = monotonic()
     args = parse_args()
     fallback_domains = [domain.strip() for domain in args.fallback_domains.split(",") if domain.strip()]
-    all_targets = _pick_best_targets(_read_targets(args.input), args.limit)
-    all_target_product_ids = {str(row.get("product_id")) for row in all_targets if row.get("product_id")}
+    target_count = _count_best_targets(args.input, args.limit)
 
-    checkpoint = _read_checkpoint(args.output, all_target_product_ids) if args.resume else {}
+    checkpoint = _read_checkpoint(args.output) if args.resume else {}
     checkpoint_product_ids = checkpoint.get("product_ids", set())
     if not isinstance(checkpoint_product_ids, set):
         checkpoint_product_ids = set()
-    targets = [
-        row
-        for row in all_targets
-        if str(row.get("product_id")) not in checkpoint_product_ids
-    ]
-    skipped_checkpoint_count = len(all_targets) - len(targets)
+    skipped_checkpoint_count = 0
 
     output_path = Path(args.output).expanduser()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -261,11 +292,10 @@ def main() -> None:
         _ensure_append_starts_on_new_line(args.output)
     output_mode = "a" if args.resume else "w"
 
-    print(f"Loaded {len(all_targets)} distinct product targets from {args.input}", flush=True)
+    print(f"Loaded {target_count} distinct product targets from {args.input}", flush=True)
     if args.resume:
         print(
-            f"Resume enabled: skipping {skipped_checkpoint_count} products already in {args.output}; "
-            f"remaining={len(targets)}",
+            f"Resume enabled: products already in {args.output} will be skipped while streaming targets",
             flush=True,
         )
 
@@ -277,7 +307,15 @@ def main() -> None:
             fallback_domains=fallback_domains,
         ).to_dict()
 
-    progress = ProgressReporter("Crawling products", total=len(targets), every=args.progress_every)
+    def pending_targets() -> Iterable[dict[str, str]]:
+        nonlocal skipped_checkpoint_count
+        for row in _iter_best_targets(args.input, args.limit):
+            if str(row.get("product_id")) in checkpoint_product_ids:
+                skipped_checkpoint_count += 1
+                continue
+            yield row
+
+    progress = ProgressReporter("Crawling products", total=target_count, every=args.progress_every)
     active_count = int(checkpoint.get("active_count", 0)) if args.resume else 0
     ok_count = int(checkpoint.get("ok_count", 0)) if args.resume else 0
     status_counts = checkpoint.get("status_counts", Counter()) if args.resume else Counter()
@@ -305,12 +343,35 @@ def main() -> None:
         with output_path.open(output_mode, encoding="utf-8") as handle:
             if args.workers > 1:
                 executor = ThreadPoolExecutor(max_workers=args.workers)
-                futures = [executor.submit(crawl, row) for row in targets]
+                target_iter = iter(pending_targets())
+                futures = set()
+                max_pending = max(1, args.workers * 2)
+
+                def submit_next() -> bool:
+                    try:
+                        target = next(target_iter)
+                    except StopIteration:
+                        return False
+                    futures.add(executor.submit(crawl, target))
+                    return True
+
+                for _ in range(max_pending):
+                    if not submit_next():
+                        break
                 try:
-                    for completed, future in enumerate(as_completed(futures), start=1):
-                        row = future.result()
-                        record_row(handle, row)
-                        progress.report(completed, suffix=f"ok={ok_count:,}, active={active_count:,}")
+                    completed = 0
+                    while futures:
+                        for future in as_completed(list(futures)):
+                            futures.remove(future)
+                            row = future.result()
+                            record_row(handle, row)
+                            completed += 1
+                            progress.report(
+                                skipped_checkpoint_count + completed,
+                                suffix=f"ok={ok_count:,}, active={active_count:,}",
+                            )
+                            submit_next()
+                            break
                 except KeyboardInterrupt:
                     cancelled = True
                     for future in futures:
@@ -320,10 +381,13 @@ def main() -> None:
                 else:
                     executor.shutdown(wait=True)
             else:
-                for completed, target in enumerate(targets, start=1):
+                for completed, target in enumerate(pending_targets(), start=1):
                     row = crawl(target)
                     record_row(handle, row)
-                    progress.report(completed, suffix=f"ok={ok_count:,}, active={active_count:,}")
+                    progress.report(
+                        skipped_checkpoint_count + completed,
+                        suffix=f"ok={ok_count:,}, active={active_count:,}",
+                    )
     except KeyboardInterrupt:
         cancelled = True
         print("Cancellation requested. Partial crawl output has already been checkpointed.", flush=True)
@@ -331,7 +395,7 @@ def main() -> None:
     progress.report(processed_this_run, force=True, suffix=f"ok={ok_count:,}, active={active_count:,}")
     checkpoint_row_count = int(checkpoint.get("row_count", 0)) if args.resume else 0
     processed_total = checkpoint_row_count + processed_this_run
-    remaining_count = max(len(all_targets) - processed_total, 0)
+    remaining_count = max(target_count - skipped_checkpoint_count - processed_this_run, 0)
     print(f"Wrote {processed_this_run} product information rows to {args.output}")
 
     elapsed = monotonic() - started_at
@@ -345,8 +409,8 @@ def main() -> None:
         "output": args.output,
         "failed_output": args.failed_output,
         "summary_output": args.summary_output,
-        "target_count": len(all_targets),
-        "pending_target_count": len(targets),
+        "target_count": target_count,
+        "pending_target_count": target_count - skipped_checkpoint_count,
         "skipped_checkpoint_count": skipped_checkpoint_count,
         "checkpoint_row_count": checkpoint_row_count,
         "checkpoint_invalid_line_count": int(checkpoint.get("invalid_line_count", 0)) if args.resume else 0,
@@ -365,14 +429,14 @@ def main() -> None:
         "elapsed_seconds": round(elapsed, 3),
         "elapsed": format_duration(elapsed),
     }
-    failed_target_count = _write_failed_targets(args.output, args.failed_output, all_targets)
+    failed_target_count = _write_failed_targets(args.output, args.failed_output, _iter_best_targets(args.input, args.limit))
     summary["failed_target_count"] = failed_target_count
     write_summary_json(args.summary_output, summary)
     print(f"Wrote crawl summary to {args.summary_output}")
     print(f"Wrote {failed_target_count} failed crawl targets to {args.failed_output}")
     print(
         f"Crawl {'cancelled' if cancelled else 'finished'} in {format_duration(elapsed)}: "
-        f"processed={processed_total:,}/{len(all_targets):,}, "
+        f"processed={processed_total:,}/{target_count:,}, "
         f"this_run={processed_this_run:,}, ok={ok_count:,}, active={active_count:,}, "
         f"success={success_rate_processed:.2f}%",
         flush=True,

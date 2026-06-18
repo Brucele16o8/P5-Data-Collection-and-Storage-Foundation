@@ -360,7 +360,6 @@ def main() -> None:
     output_path = Path(args.output).expanduser()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    seen_ips: set[str] = set()
     batch: list[dict[str, Any]] = []
     processed_count = 0
     source_ip_count = 0
@@ -429,12 +428,6 @@ def main() -> None:
             )
             for ip in ip_iterator:
                 source_ip_count += 1
-                normalized = normalize_ip(ip) or str(ip)
-                if normalized in seen_ips:
-                    skipped_duplicate_count += 1
-                    continue
-                seen_ips.add(normalized)
-
                 row = build_row(str(ip))
                 write_jsonl_row(handle, row)
                 batch.append(row)
