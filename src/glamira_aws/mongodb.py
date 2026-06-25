@@ -1,4 +1,4 @@
-"""MongoDB helpers for the EC2 execution path."""
+"""MongoDB helpers for the local Project 5 execution path."""
 
 from __future__ import annotations
 

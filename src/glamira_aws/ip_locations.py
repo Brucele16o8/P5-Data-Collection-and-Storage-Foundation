@@ -83,7 +83,7 @@ def lookup_ip2location(ip_value: Any, db_path: str | None, allow_private: bool =
             ip=ip,
             processed_at=processed_at,
             status="missing_dependency",
-            error_message="Install ip2location-python or pass it as a Glue additional Python module.",
+            error_message="Install ip2location-python or configure a local IP2Location BIN file.",
         )
 
     try:

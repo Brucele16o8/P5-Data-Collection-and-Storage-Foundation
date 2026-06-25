@@ -1,113 +1,61 @@
-# AWS Architecture
+# Project 5 Local/EC2 Architecture
 
-The Project 05 AWS implementation uses two separate environments.
+Project 5 is focused on source understanding and data collection. The intended deployment is the same workflow on a laptop or on one EC2 instance:
 
-```text
-LOCAL DEVELOPMENT ENVIRONMENT
-Your Mac
-├── PyCharm + AI support
-├── Python source code
-├── Docker MongoDB
-│   └── small/sample Glamira data
-└── local test output
-        |
-        | git push
-        v
-GitHub repository
-        |
-        | git clone / git pull
-        v
-AWS CLOUD ENVIRONMENT
-EC2 instance
-├── Python source code from GitHub
-├── Docker MongoDB
-│   └── full Glamira data restored from S3
-├── crawler execution
-└── output uploaded to S3
-```
+- MongoDB runs in Docker.
+- Python runs from this repository.
+- The MongoDB dump, IP2Location BIN file, and outputs live on local disk or EBS.
+- S3 can be used to store or transfer large files, but the application reads local paths after files are copied down.
 
-Local development:
+## Flow
 
 ```text
-Python on Mac
-  -> mongodb://localhost:27017
-  -> Docker MongoDB sample collection
-  -> outputs/local-test
+Local or EC2 filesystem / EBS
+    -> Docker MongoDB restore
+    -> MongoDB collection
+    -> product event extraction
+    -> ranked product_targets.csv
+    -> product crawler
+    -> product_information.jsonl
+    -> product_information_warehouse.csv
+    -> product_react_data.jsonl
+
+MongoDB collection
+    -> distinct IP discovery
+    -> local IP2Location lookup
+    -> ip_locations.jsonl
 ```
 
-AWS execution:
+## Boundaries
 
-```text
-Python on EC2
-  -> mongodb://localhost:27017
-  -> Docker MongoDB full collection
-  -> outputs/aws-test, then outputs/local-full-run
-  -> S3 product-information/
-```
+`src/glamira_aws/events.py`
+: Pure rules for identifying product events and candidate URLs.
 
-The connection string can stay as `mongodb://localhost:27017` in both places because Python and Docker MongoDB run on the same machine in each environment.
+`src/glamira_aws/product_targets.py`
+: Application service for writing ranked product target outputs.
 
-Use the same Docker container name in both places when possible:
+`src/glamira_aws/product_crawler.py`
+: Product page URL strategy, HTTP crawling, and `react_data` parsing.
 
-```text
-mongo-explore
-```
+`src/glamira_aws/product_export.py`
+: Splits full crawler output into warehouse-friendly product fields and raw `react_data` archive.
 
-Sample-first execution order:
+`src/glamira_aws/ip_locations.py`
+: IP normalization, validation, and IP2Location lookups.
 
-```text
-local sample
-  -> local tests
-  -> push code
-  -> EC2 cloud sample
-  -> EC2 full collection
-  -> S3 upload
-```
+`src/glamira_aws/crawl_state.py`
+: Resume/checkpoint and failed-target reporting.
 
-Full-data local execution is allowed when the Mac has enough resources, but EC2 remains the required cloud validation environment:
+`src/glamira_aws/observability.py`
+: Observer interfaces for progress, logging, and later audit writers.
 
-```text
-S3 raw MongoDB dump
-  -> EC2 downloads dump
-  -> mongorestore into Docker MongoDB on EC2
-  -> Python enriches distinct visitor IPs from all MongoDB source records
-  -> Python extracts product targets from countly.summary
-  -> Python crawls product pages
-  -> S3 product-information output
-```
+## Why This Shape
 
-EC2 should use an IAM role:
+This project keeps source acquisition separate from later warehouse work:
 
-```text
-EC2 role
-  -> read s3://glamira-data-lake-20260611/raw/*
-  -> write s3://glamira-data-lake-20260611/product-information/*
-```
+- Python owns local extraction, crawling, validation, and raw output files.
+- S3/EBS are storage locations, not application architecture.
+- The same scripts can run on a laptop or EC2 without changing code.
+- Transformations into star-schema facts and dimensions belong to a later project.
 
-Do not copy local AWS SSO profiles, admin credentials, MongoDB database files, or raw dump files into GitHub. The final `outputs/local-full-run` deliverable can be added deliberately when it is ready for submission.
-
-The Python code stays environment-independent:
-
-```text
-MONGO_URI
-MONGO_DATABASE
-MONGO_COLLECTION
-OUTPUT_DIRECTORY
-```
-
-Changing those values switches between:
-
-```text
-countly_samples.summary_random_100000
-countly.summary
-```
-
-and between:
-
-```text
-outputs/local-test
-outputs/aws-test
-outputs/local-full-run
-```
-
-Glue, Redshift, Batch, ECS, and Fargate remain possible future upgrades, but they are not required for the VM + MongoDB objective.
+This keeps Project 5 testable, explainable, and close to how it will actually run on EC2.

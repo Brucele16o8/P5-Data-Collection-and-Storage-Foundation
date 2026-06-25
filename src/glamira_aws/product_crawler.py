@@ -6,7 +6,7 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urlparse
 
 
@@ -110,35 +110,58 @@ def _catalog_url(domain: str, product_id: str) -> str:
     return f"https://{domain}/catalog/product/view/id/{product_id}"
 
 
+class ProductUrlAttemptStrategy(Protocol):
+    """Strategy for building product crawl URL attempts."""
+
+    def build_attempts(self, product_id: str, source_url: str) -> list[dict[str, str]]:
+        """Return URL attempts in priority order for one product."""
+
+
+class DefaultGlamiraUrlAttemptStrategy:
+    """Default Glamira URL fallback policy.
+
+    The policy starts with the event URL, tries an English source-store catalog
+    URL early, then configured fallback domains, and finally a non-English
+    source domain. Keeping this as a strategy avoids baking one store policy
+    into the network crawler.
+    """
+
+    def __init__(self, fallback_domains: list[str] | None = None) -> None:
+        self._fallback_domains = fallback_domains or DEFAULT_FALLBACK_DOMAINS
+
+    def build_attempts(self, product_id: str, source_url: str) -> list[dict[str, str]]:
+        attempts: list[dict[str, str]] = []
+        seen: set[str] = set()
+
+        def add(url: str | None, strategy: str) -> None:
+            if not url or url in seen:
+                return
+            seen.add(url)
+            attempts.append({"url": url, "strategy": strategy})
+
+        add(source_url, "original_url")
+
+        source_host = urlparse(source_url).netloc.lower()
+        if source_host in ENGLISH_STORE_DOMAINS:
+            add(_catalog_url(source_host, product_id), "source_domain_product_id_url")
+
+        for domain in self._fallback_domains:
+            add(_catalog_url(domain, product_id), "fallback_domain_product_id_url")
+
+        if source_host and source_host not in ENGLISH_STORE_DOMAINS:
+            add(_catalog_url(source_host, product_id), "source_domain_product_id_url")
+
+        return attempts
+
+
 def build_product_url_attempts(
     product_id: str,
     source_url: str,
     fallback_domains: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """Return URL attempts in priority order for one product."""
-    fallback_domains = fallback_domains or DEFAULT_FALLBACK_DOMAINS
-    attempts: list[dict[str, str]] = []
-    seen: set[str] = set()
 
-    def add(url: str | None, strategy: str) -> None:
-        if not url or url in seen:
-            return
-        seen.add(url)
-        attempts.append({"url": url, "strategy": strategy})
-
-    add(source_url, "original_url")
-
-    source_host = urlparse(source_url).netloc.lower()
-    if source_host in ENGLISH_STORE_DOMAINS:
-        add(_catalog_url(source_host, product_id), "source_domain_product_id_url")
-
-    for domain in fallback_domains:
-        add(_catalog_url(domain, product_id), "fallback_domain_product_id_url")
-
-    if source_host and source_host not in ENGLISH_STORE_DOMAINS:
-        add(_catalog_url(source_host, product_id), "source_domain_product_id_url")
-
-    return attempts
+    return DefaultGlamiraUrlAttemptStrategy(fallback_domains).build_attempts(product_id, source_url)
 
 
 def _extract_balanced_object(text: str, start_index: int) -> str | None:
@@ -285,6 +308,7 @@ def fetch_product_info(
     source_url: str,
     timeout_seconds: int = 20,
     fallback_domains: list[str] | None = None,
+    url_strategy: ProductUrlAttemptStrategy | None = None,
 ) -> ProductInfo:
     scraped_at = datetime.now(timezone.utc).isoformat()
     attempts: list[dict[str, Any]] = []
@@ -294,7 +318,8 @@ def fetch_product_info(
         import requests
 
         session = requests.Session()
-        for attempt in build_product_url_attempts(product_id, source_url, fallback_domains):
+        attempt_strategy = url_strategy or DefaultGlamiraUrlAttemptStrategy(fallback_domains)
+        for attempt in attempt_strategy.build_attempts(product_id, source_url):
             url = attempt["url"]
             strategy = attempt["strategy"]
             try:

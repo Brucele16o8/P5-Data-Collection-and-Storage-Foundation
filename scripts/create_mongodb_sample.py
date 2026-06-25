@@ -1,4 +1,4 @@
-"""Create a MongoDB sample collection for local or EC2 validation."""
+"""Create a MongoDB sample collection for local validation."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Small terminal progress helper for long-running local and EC2 scripts."""
+"""Small terminal progress helper for long-running local scripts."""
 
 from __future__ import annotations
 

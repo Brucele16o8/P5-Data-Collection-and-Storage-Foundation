@@ -1,4 +1,4 @@
-"""Process distinct IP addresses from MongoDB with an IP2Location BIN file."""
+"""Process distinct IP addresses from MongoDB with a local IP2Location BIN file."""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ from glamira_aws.events import build_product_url_candidate
 from glamira_aws.ip_locations import IPLocation, lookup_ip2location, lookup_ip2location_with_database, normalize_ip
 from glamira_aws.mongodb import MongoSettings, get_collection, product_event_query
 from glamira_aws.progress import ProgressReporter, format_duration, write_summary_json
-from glamira_aws.s3_io import download_to_tmp, is_s3_uri, parse_s3_uri
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--database", default=defaults.database)
     parser.add_argument("--collection", default=defaults.collection)
     parser.add_argument("--ip-field", default="ip")
-    parser.add_argument("--ip2location-db-uri", default=os.getenv("IP2LOCATION_DB_URI"))
+    parser.add_argument("--ip2location-db-path", default=os.getenv("IP2LOCATION_DB_PATH"))
     parser.add_argument("--output", default=str(output_directory / "ip_locations.jsonl"))
     parser.add_argument(
         "--product-targets",
@@ -43,7 +42,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--product-id-field", default="product_id")
-    parser.add_argument("--output-s3-uri", default=os.getenv("IP_LOCATION_OUTPUT_S3_URI"))
     parser.add_argument("--target-db", default=os.getenv("IP_LOCATION_TARGET_DB", "countly_enriched"))
     parser.add_argument(
         "--target-collection",
@@ -257,15 +255,6 @@ def iter_distinct_ips(
     yield from iter_distinct_ips_scan(collection, ip_field, limit, progress_every, stats=stats)
 
 
-def upload_to_s3(local_path: str, s3_uri: str) -> None:
-    if not is_s3_uri(s3_uri):
-        raise ValueError("--output-s3-uri must start with s3://")
-    import boto3
-
-    bucket, key = parse_s3_uri(s3_uri)
-    boto3.client("s3").upload_file(local_path, bucket, key)
-
-
 def write_locations_to_mongodb(uri: str, database: str, collection_name: str, rows: list[dict[str, Any]]) -> int:
     collection = get_collection(uri, database, collection_name)
     collection.drop()
@@ -325,9 +314,7 @@ def main() -> None:
     started_at = monotonic()
     args = parse_args()
     args.mongodb_batch_size = max(1, args.mongodb_batch_size)
-    if args.ip2location_db_uri:
-        print(f"Preparing IP2Location database from {args.ip2location_db_uri}", flush=True)
-    db_path = download_to_tmp(args.ip2location_db_uri, suffix=".BIN") if args.ip2location_db_uri else None
+    db_path = str(Path(args.ip2location_db_path).expanduser()) if args.ip2location_db_path else None
     if db_path:
         print(f"IP2Location database ready at {db_path}", flush=True)
     collection = get_collection(args.uri, args.database, args.collection)
@@ -506,7 +493,7 @@ def main() -> None:
         "status_counts": dict(status_counts),
         "country_counts": dict(country_counts),
         "location_counts": dict(location_counts),
-        "ip2location_db_uri": args.ip2location_db_uri,
+        "ip2location_db_path": args.ip2location_db_path,
         "ip_discovery_mode": args.ip_discovery_mode,
         "mongodb_batch_size": args.mongodb_batch_size,
         "elapsed_seconds": round(elapsed, 3),
@@ -519,11 +506,6 @@ def main() -> None:
         f"processed={processed_count:,}",
         flush=True,
     )
-
-    if args.output_s3_uri:
-        print(f"Uploading {args.output} to {args.output_s3_uri}", flush=True)
-        upload_to_s3(args.output, args.output_s3_uri)
-        print(f"Uploaded {args.output} to {args.output_s3_uri}")
 
     if cancelled:
         sys.exit(130)

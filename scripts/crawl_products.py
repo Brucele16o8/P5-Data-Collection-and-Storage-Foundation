@@ -1,4 +1,4 @@
-"""Crawl one best product URL per product ID and optionally upload the result to S3."""
+"""Crawl one best product URL per product ID into a local JSONL file."""
 
 from __future__ import annotations
 
@@ -20,9 +20,12 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from glamira_aws.mongodb import read_csv, read_jsonl
+from glamira_aws.crawl_state import ensure_append_starts_on_new_line
+from glamira_aws.crawl_state import latest_rows_by_product
+from glamira_aws.crawl_state import read_crawl_checkpoint
+from glamira_aws.crawl_state import write_failed_targets
 from glamira_aws.product_crawler import DEFAULT_FALLBACK_DOMAINS, fetch_product_info
 from glamira_aws.progress import ProgressReporter, format_duration, write_summary_json
-from glamira_aws.s3_io import is_s3_uri, parse_s3_uri
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,7 +33,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", default=str(output_directory / "product_targets.csv"))
     parser.add_argument("--output", default=str(output_directory / "product_information.jsonl"))
-    parser.add_argument("--output-s3-uri", default=os.getenv("OUTPUT_S3_URI"))
     parser.add_argument("--failed-output", default=str(output_directory / "product_failed_targets.csv"))
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--resume", action="store_true", help="Skip product IDs already present in the output JSONL.")
@@ -106,15 +108,6 @@ def _pick_best_targets(rows: list[dict[str, str]], limit: int | None) -> list[di
     return list(best.values())
 
 
-def _upload_to_s3(local_path: str, s3_uri: str) -> None:
-    if not is_s3_uri(s3_uri):
-        raise ValueError("--output-s3-uri must start with s3://")
-    import boto3
-
-    bucket, key = parse_s3_uri(s3_uri)
-    boto3.client("s3").upload_file(local_path, bucket, key)
-
-
 def _percentage(numerator: int, denominator: int) -> float:
     if denominator <= 0:
         return 0.0
@@ -122,83 +115,11 @@ def _percentage(numerator: int, denominator: int) -> float:
 
 
 def _read_checkpoint(path: str, target_product_ids: set[str] | None = None) -> dict[str, object]:
-    output_path = Path(path).expanduser()
-    product_ids: set[str] = set()
-    status_counts: Counter[str] = Counter()
-    country_counts: Counter[str] = Counter()
-    ok_count = 0
-    active_count = 0
-    row_count = 0
-    invalid_line_count = 0
-
-    if not output_path.exists():
-        return {
-            "product_ids": product_ids,
-            "status_counts": status_counts,
-            "country_counts": country_counts,
-            "ok_count": ok_count,
-            "active_count": active_count,
-            "row_count": row_count,
-            "invalid_line_count": invalid_line_count,
-        }
-
-    with output_path.open(encoding="utf-8") as handle:
-        for line in handle:
-            if not line.strip():
-                continue
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                invalid_line_count += 1
-                continue
-            requested_product_id = row.get("requested_product_id")
-            if requested_product_id is None:
-                continue
-            requested_product_id = str(requested_product_id)
-            if target_product_ids is not None and requested_product_id not in target_product_ids:
-                continue
-            product_ids.add(requested_product_id)
-            status = str(row.get("status"))
-            status_counts[status] += 1
-            if row.get("country_store"):
-                country_counts[str(row.get("country_store"))] += 1
-            ok_count += 1 if status == "ok" else 0
-            active_count += 1 if row.get("active") else 0
-            row_count += 1
-
-    return {
-        "product_ids": product_ids,
-        "status_counts": status_counts,
-        "country_counts": country_counts,
-        "ok_count": ok_count,
-        "active_count": active_count,
-        "row_count": row_count,
-        "invalid_line_count": invalid_line_count,
-    }
+    return read_crawl_checkpoint(path, target_product_ids)
 
 
 def _latest_rows_by_product(path: str, target_product_ids: set[str] | None = None) -> dict[str, dict[str, object]]:
-    output_path = Path(path).expanduser()
-    latest: dict[str, dict[str, object]] = {}
-    if not output_path.exists():
-        return latest
-
-    with output_path.open(encoding="utf-8") as handle:
-        for line in handle:
-            if not line.strip():
-                continue
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            requested_product_id = row.get("requested_product_id")
-            if requested_product_id is None:
-                continue
-            product_id = str(requested_product_id)
-            if target_product_ids is not None and product_id not in target_product_ids:
-                continue
-            latest[product_id] = row
-    return latest
+    return latest_rows_by_product(path, target_product_ids)
 
 
 def _write_failed_targets(
@@ -206,57 +127,7 @@ def _write_failed_targets(
     failed_output_path: str,
     targets: Iterable[dict[str, str]],
 ) -> int:
-    target_by_product_id = {
-        str(row.get("product_id")): row
-        for row in targets
-        if row.get("product_id")
-    }
-    target_product_ids = set(target_by_product_id)
-    latest_rows = _latest_rows_by_product(product_info_path, target_product_ids)
-    fieldnames = [
-        "product_id",
-        "candidate_url",
-        "last_status",
-        "failure_reason",
-        "error_message",
-        "attempt_count",
-        "last_source_url",
-        "last_resolved_url",
-        "scraped_at",
-    ]
-    output_path = Path(failed_output_path).expanduser()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    failed_count = 0
-
-    with output_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        for product_id in sorted(latest_rows):
-            row = latest_rows[product_id]
-            if row.get("status") == "ok":
-                continue
-            target = target_by_product_id.get(product_id, {})
-            attempts = row.get("attempts")
-            writer.writerow(
-                {
-                    "product_id": product_id,
-                    "candidate_url": (
-                        target.get("candidate_url")
-                        or row.get("original_url")
-                        or row.get("source_url")
-                        or ""
-                    ),
-                    "last_status": row.get("status"),
-                    "failure_reason": row.get("failure_reason"),
-                    "error_message": row.get("error_message"),
-                    "attempt_count": len(attempts) if isinstance(attempts, list) else 0,
-                    "last_source_url": row.get("source_url"),
-                    "last_resolved_url": row.get("resolved_url"),
-                    "scraped_at": row.get("scraped_at"),
-                }
-            )
-            failed_count += 1
-    return failed_count
+    return write_failed_targets(product_info_path, failed_output_path, targets)
 
 
 def _write_jsonl_row(handle, row: dict[str, object]) -> None:
@@ -265,13 +136,7 @@ def _write_jsonl_row(handle, row: dict[str, object]) -> None:
 
 
 def _ensure_append_starts_on_new_line(path: str) -> None:
-    output_path = Path(path).expanduser()
-    if not output_path.exists() or output_path.stat().st_size == 0:
-        return
-    with output_path.open("rb+") as handle:
-        handle.seek(-1, os.SEEK_END)
-        if handle.read(1) != b"\n":
-            handle.write(b"\n")
+    ensure_append_starts_on_new_line(path)
 
 
 def main() -> None:
@@ -400,7 +265,7 @@ def main() -> None:
 
     elapsed = monotonic() - started_at
     success_rate_processed = _percentage(ok_count, processed_total)
-    success_rate_target = _percentage(ok_count, len(all_targets))
+    success_rate_target = _percentage(ok_count, target_count)
     summary = {
         "stage": "crawl_products",
         "cancelled": cancelled,
@@ -441,10 +306,6 @@ def main() -> None:
         f"success={success_rate_processed:.2f}%",
         flush=True,
     )
-
-    if args.output_s3_uri:
-        _upload_to_s3(args.output, args.output_s3_uri)
-        print(f"Uploaded {args.output} to {args.output_s3_uri}")
 
     if cancelled:
         sys.exit(130)

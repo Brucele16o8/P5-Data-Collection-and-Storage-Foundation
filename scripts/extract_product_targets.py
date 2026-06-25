@@ -22,6 +22,8 @@ from glamira_aws.mongodb import (
     write_csv,
     write_jsonl,
 )
+from glamira_aws.observability import TerminalProgressObserver
+from glamira_aws.product_targets import ProductTargetExportRequest, ProductTargetExportService
 from glamira_aws.progress import format_duration, write_summary_json
 
 
@@ -53,23 +55,6 @@ def parse_args() -> argparse.Namespace:
 
 def _write_streamed_targets(args: argparse.Namespace) -> dict[str, int | str | bool | None]:
     output_path = Path(args.output).expanduser()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = [
-        "product_id",
-        "candidate_url",
-        "source_event_type",
-        "url_source_field",
-        "event_count",
-        "first_seen_at",
-        "last_seen_at",
-        "url_rank",
-    ]
-    output_mode = "all_ranked_candidates" if args.include_all_candidates else "one_best_target_per_product"
-    grouped_url_count = 0
-    candidate_records = 0
-    target_rows = 0
-    unique_products = 0
-    last_product_id = None
 
     collection = get_collection(args.uri, args.database, args.collection)
     scanned_records = None
@@ -80,78 +65,40 @@ def _write_streamed_targets(args: argparse.Namespace) -> dict[str, int | str | b
     except Exception:
         scanned_records = None
 
-    progress = None
-    if args.progress_every:
-        from glamira_aws.progress import ProgressReporter
-
-        progress = ProgressReporter(
+    observer = (
+        TerminalProgressObserver(
             "Streaming MongoDB product target aggregation",
             total=None,
             every=args.progress_every,
         )
-
-    if args.format == "jsonl":
-        import json
-
-        with output_path.open("w", encoding="utf-8") as handle:
-            for row in iter_product_targets_mongodb(
-                args.uri,
-                args.database,
-                args.collection,
-                limit_records=args.limit_records,
-                include_all_candidates=True,
-            ):
-                grouped_url_count += 1
-                candidate_records += int(row.get("event_count") or 0)
-                if row.get("product_id") != last_product_id:
-                    unique_products += 1
-                    last_product_id = row.get("product_id")
-                if not args.include_all_candidates and int(row.get("url_rank") or 0) > 1:
-                    if progress:
-                        progress.report(grouped_url_count, suffix=f"target_rows={target_rows:,}")
-                    continue
-                handle.write(json.dumps(row, default=str, ensure_ascii=False) + "\n")
-                target_rows += 1
-                if progress:
-                    progress.report(grouped_url_count, suffix=f"target_rows={target_rows:,}")
-    else:
-        import csv
-
-        with output_path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
-            writer.writeheader()
-            for row in iter_product_targets_mongodb(
-                args.uri,
-                args.database,
-                args.collection,
-                limit_records=args.limit_records,
-                include_all_candidates=True,
-            ):
-                grouped_url_count += 1
-                candidate_records += int(row.get("event_count") or 0)
-                if row.get("product_id") != last_product_id:
-                    unique_products += 1
-                    last_product_id = row.get("product_id")
-                if not args.include_all_candidates and int(row.get("url_rank") or 0) > 1:
-                    if progress:
-                        progress.report(grouped_url_count, suffix=f"target_rows={target_rows:,}")
-                    continue
-                writer.writerow(row)
-                target_rows += 1
-                if progress:
-                    progress.report(grouped_url_count, suffix=f"target_rows={target_rows:,}")
-
-    if progress:
-        progress.report(grouped_url_count, force=True, suffix=f"target_rows={target_rows:,}")
+        if args.progress_every
+        else None
+    )
+    service = ProductTargetExportService(observer=observer)
+    result = service.export_stream(
+        iter_product_targets_mongodb(
+            args.uri,
+            args.database,
+            args.collection,
+            limit_records=args.limit_records,
+            include_all_candidates=True,
+        ),
+        ProductTargetExportRequest(
+            output_path=output_path,
+            output_format=args.format,
+            include_all_candidates=args.include_all_candidates,
+        ),
+        scanned_records=scanned_records,
+    )
 
     return {
-        "aggregation_engine": "mongodb",
-        "output_mode": output_mode,
-        "scanned_records": scanned_records,
-        "candidate_records": candidate_records,
-        "grouped_url_count": grouped_url_count,
-        "target_rows": target_rows,
-        "unique_products": unique_products,
+        "aggregation_engine": result.aggregation_engine,
+        "output_mode": result.output_mode,
+        "scanned_records": result.scanned_records,
+        "candidate_records": result.candidate_records,
+        "grouped_url_count": result.grouped_url_count,
+        "target_rows": result.target_rows,
+        "unique_products": result.unique_products,
     }
 
 
